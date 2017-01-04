@@ -6,6 +6,11 @@
 #include <set>
 #include <algorithm>
 #include <string>
+#include <cmath>
+#include <ctime>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 using namespace std;
 
@@ -15,7 +20,7 @@ using namespace std;
 enum Direction {up, down, left, right};
 struct GameBoard {
     uint8_t *board;
-    uint8_t fscore, gscore;
+    uint32_t fscore, gscore;
     GameBoard* previous;
 
     GameBoard() {
@@ -27,7 +32,7 @@ struct GameBoard {
 
     GameBoard apply_move(Direction move) const {
       GameBoard ret;
-      ret.fscore = this->fscore + (uint8_t) 1;
+      ret.fscore = this->fscore + 1;
       std::memcpy(ret.board, this->board, BOARD_SIZE);
       ret.previous = const_cast<GameBoard*>(this);
 
@@ -72,10 +77,18 @@ struct GameBoard {
       return true;
     };
 
-    uint8_t eval_gscore() {
-      uint8_t g = 0;
+    uint32_t eval_gscore() {
+      uint32_t g = 0;
       for (int i = 0; i < BOARD_SIZE; i++) {
-        if (board[i] != i + 1) g++;
+        if (board[i] != i + 1) {
+          if (board[i] == BOARD_SIZE) continue;
+          auto p = off_to_pos(i);
+          auto pp = off_to_pos(board[i] - 1);
+          int dx = p.first - pp.first;
+          int dy = p.second - pp.second;
+          int dis = abs(dx) + abs(dy);
+          g+=  10 * dis;
+        }
       }
       gscore = g;
       return g;
@@ -94,8 +107,8 @@ struct GameBoard {
     }
 
     static bool compare_gscore(GameBoard const &a, GameBoard const &b) {
-      assert(a.gscore <= 16  && b.gscore <= 16);
-      return (a.fscore + a.gscore > b.fscore + b.gscore);
+      assert(a.gscore >= 0  && b.gscore >= 0);
+      return (a.fscore  + a.gscore > b.fscore + b.gscore);
     }
 
     static bool compare_content(GameBoard const &a, GameBoard const &b) {
@@ -166,13 +179,17 @@ struct MyVector {
 
 
 };
-
+mutex openset_lock;
+mutex closedset_lock;
 MyVector openset;
 set<GameBoard, decltype(&GameBoard::compare_content)> closedset(GameBoard::compare_content);
 
 GameBoard read_from_stdin();
 void evaluate_one_node(GameBoard const& game);
-GameBoard solve(GameBoard const& start);
+void solve() ;
+
+bool solution_found = false;
+GameBoard* global_start;
 
 int main() {
   GameBoard start;
@@ -184,19 +201,50 @@ int main() {
   test.board = test_buf;
   test.gscore = 99;
   assert(closedset.find(test) != closedset.end());
-  GameBoard solution = solve(start);
-  std::cout << "found a solution!" << std::endl;
+
+  clock_t begin = clock();
+  const int num_threads = 1;
+  std::thread t[num_threads];
+  //Launch a group of threads
+  global_start = &start;
+
+  //t[1] = std::thread(solve);
+  openset.insert(start);
+  for (int i = 0; i < num_threads; ++i) {
+      t[i] = std::thread(solve);
+  }
+
+  for (int i = 0; i < num_threads; ++i) {
+      t[i].join();
+  }
+
+  //GameBoard solution = solve(start);
+  clock_t end = clock();
+  double elapsed_secs = double(end - begin) / CLOCKS_PER_SEC;
+  std::cout << "found a solution! running time " << elapsed_secs << std::endl;
   return 0;
 }
 
-GameBoard solve(GameBoard const& start) {
-  openset.insert(start);
-  while (!openset.is_empty()) {
-    GameBoard this_node = openset.pop_front();
-    if (this_node.is_goal()) {
-      return this_node;
+void solve() {
+  
+  while (true) {
+    if (solution_found) {
+      std::cout << "thread terminated" << std::endl;
+      return;
     }
-    std::cout << (int)this_node.gscore << std::endl;
+    openset_lock.lock();
+    if (openset.is_empty()) {
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      openset_lock.unlock();
+      continue;
+    }
+    GameBoard this_node = openset.pop_front();
+    openset_lock.unlock();
+    if (this_node.is_goal()) {
+      solution_found = true;
+      return;
+    }
+    std::cout << this_node.gscore << std::endl;
     evaluate_one_node(this_node);
 
   }
@@ -208,20 +256,27 @@ void evaluate_one_node(GameBoard const& game) {
   assert(moves.size() >= 2);
   for (Direction move: moves) {
     GameBoard new_node(game.apply_move(move));
+    closedset_lock.lock();
     if (closedset.find(new_node) != closedset.end()) { // already traversed
       delete[] new_node.board;
+      closedset_lock.unlock();
       continue;
     } else {
       closedset.insert(new_node);
     }
+    closedset_lock.unlock();
 
+    openset_lock.lock();
+    
     int res = openset.has_member(new_node);
     if (-1 == res) { // this is a new node
       openset.insert(new_node);
     } else if (res < new_node.fscore) { // if the new node is worse than the old
       delete[] new_node.board; // free memory
+      openset_lock.unlock();
       continue;
     }
+    openset_lock.unlock();
 
   }
 }
